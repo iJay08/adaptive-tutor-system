@@ -1,12 +1,18 @@
+import logging
 from typing import Dict, Any
 from sqlalchemy.orm import Session
 from app.crud.crud_event import event as crud_event
 from app.schemas.behavior import BehaviorEvent
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC, timezone
 
 # 导入BKT模型
 from ..models.bkt import BKTModel
-from .behavior_interpreter_service import BehaviorInterpreterService
+
+# 移除循环导入
+# from .behavior_interpreter_service import BehaviorInterpreterService
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 class StudentProfile:
     def __init__(self, participant_id, is_new_user=True):
@@ -39,7 +45,6 @@ class StudentProfile:
                 serialized_bkt_models[topic_id] = bkt_model
         
         return {
-            'participant_id': self.participant_id,
             'is_new_user': self.is_new_user,
             'bkt_model': serialized_bkt_models,
             'emotion_state': self.emotion_state,
@@ -47,10 +52,10 @@ class StudentProfile:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'StudentProfile':
+    def from_dict(cls, participant_id: str, data: Dict[str, Any]) -> 'StudentProfile':
         """从字典反序列化创建StudentProfile"""
         # 注意：从数据库恢复的用户不是新用户
-        profile = cls(data['participant_id'], is_new_user=data.get('is_new_user', False))
+        profile = cls(participant_id, is_new_user=data.get('is_new_user', False))
         
         # 反序列化BKT模型
         bkt_models = data.get('bkt_model', {})
@@ -79,18 +84,94 @@ class UserStateService:
     
     def __init__(self):
         self._state_cache: Dict[str, StudentProfile] = {}
-        # 引入解释器，用于回放
-        
-        self.interpreter = BehaviorInterpreterService()
+        # 移除循环依赖：不再在初始化时创建 BehaviorInterpreterService 实例
+        # self.interpreter = BehaviorInterpreterService()
     
     def handle_event(self, event: BehaviorEvent, db: Session, background_tasks=None):
         """处理事件，并可能创建快照"""
-        # 调用解释器处理事件
-        self.interpreter.interpret_event(event)
+        # 修改调用方式：使用依赖注入
+        from .behavior_interpreter_service import behavior_interpreter_service
+        behavior_interpreter_service.interpret_event(
+            event, 
+            user_state_service=self, 
+            db_session=db, 
+            is_replay=False
+        )
         
         # 事件处理后，检查是否需要创建快照
         self._maybe_create_snapshot(event.participant_id, db, background_tasks)
 
+    def handle_frustration_event(self, participant_id: str):
+        """
+        处理挫败事件
+        
+        Args:
+            participant_id: 参与者ID
+        """
+        try:
+            # 获取用户档案
+            profile, _ = self.get_or_create_profile(participant_id, None)
+            
+            # 设置挫败状态
+            profile.emotion_state['is_frustrated'] = True
+            
+            logger.info(f"UserStateService: 标记用户 {participant_id} 为挫败状态")
+        except Exception as e:
+            logger.error(f"UserStateService: 处理挫败事件时发生错误: {e}")
+
+    def handle_ai_help_request(self, participant_id: str, content_title: str = None):
+        """
+        处理AI求助请求事件
+        
+        Args:
+            participant_id: 参与者ID
+            content_title: 内容标题
+        """
+        try:
+            # 获取用户档案
+            profile, _ = self.get_or_create_profile(participant_id, None)
+            
+            # 增加求助计数
+            profile.behavior_counters.setdefault("help_requests", 0)
+            profile.behavior_counters["help_requests"] += 1
+
+            # 增加特定内容的提问计数
+            if content_title:
+                counter_key = f"question_count_{content_title}"
+                profile.behavior_counters.setdefault(counter_key, 0)
+                profile.behavior_counters[counter_key] += 1
+            
+            logger.info(f"UserStateService: 增加用户 {participant_id} 的求助计数")
+        except Exception as e:
+            logger.error(f"UserStateService: 处理AI求助请求事件时发生错误: {e}")
+
+    def handle_lightweight_event(self, participant_id: str, event_type: str):
+        """
+        处理轻量级事件
+        
+        Args:
+            participant_id: 参与者ID
+            event_type: 事件类型
+        """
+        try:
+            # 获取用户档案
+            profile, _ = self.get_or_create_profile(participant_id, None)
+            
+            # 根据事件类型增加相应计数
+            key_map = {
+                "page_focus_change": "focus_changes",
+                "user_idle": "idle_count",
+                "dom_element_select": "dom_selects",
+                "code_edit": "code_edits"
+            }
+            
+            counter_key = key_map.get(event_type)
+            if counter_key:
+                profile.behavior_counters.setdefault(counter_key, 0)
+                profile.behavior_counters[counter_key] += 1
+                logger.info(f"UserStateService: 增加用户 {participant_id} 的 {counter_key} 计数")
+        except Exception as e:
+            logger.error(f"UserStateService: 处理轻量级事件时发生错误: {e}")
 
     def get_or_create_profile(self, participant_id: str, db: Session = None, group: str = "experimental") -> tuple[StudentProfile, bool]:
         """
@@ -122,7 +203,7 @@ class UserStateService:
                     participant_obj = participant.create(db, obj_in=create_schema)
                     is_new_user = True
         
-            print(f"INFO: Cache miss for {participant_id}. Attempting recovery from history.")
+            logger.info(f"Cache miss for {participant_id}. Attempting recovery from history.")
             # 只有在提供了数据库会话时才从数据库恢复状态
             if db is not None:
                 # 强制从数据库恢复状态。此方法会处理老用户的状态恢复，也会为新用户创建Profile。
@@ -151,10 +232,15 @@ class UserStateService:
         
         if latest_snapshot:
             # 2a. 如果找到快照，从快照恢复
-            print(f"INFO: Found snapshot for {participant_id}. Restoring from snapshot...")
+            logger.info(f"Found snapshot for {participant_id}. Restoring from snapshot...")
             # 反序列化快照数据
-            profile_data = latest_snapshot.event_data
-            temp_profile = StudentProfile.from_dict(profile_data)
+            # 检查 event_data 是否是 StateSnapshotData 实例或字典
+            if isinstance(latest_snapshot.event_data, dict) and 'profile_data' in latest_snapshot.event_data:
+                profile_data = latest_snapshot.event_data['profile_data']
+            else:
+                # 兼容旧的快照数据结构
+                profile_data = latest_snapshot.event_data
+            temp_profile = StudentProfile.from_dict(participant_id, profile_data)
             self._state_cache[participant_id] = temp_profile
             
             # 3a. 获取快照之后的事件
@@ -164,22 +250,22 @@ class UserStateService:
                 timestamp=latest_snapshot.timestamp
             )
             
-            print(f"INFO: Found {len(events_after_snapshot)} events to replay after snapshot for {participant_id}.")
+            logger.info(f"Found {len(events_after_snapshot)} events to replay after snapshot for {participant_id}.")
         else:
             # 2b. 如果没有快照，检查是否有历史事件
-            print(f"INFO: No snapshot found for {participant_id}. Checking for history...")
+            logger.info(f"No snapshot found for {participant_id}. Checking for history...")
             
             # 获取所有历史事件来判断是否是新用户
             all_history_events = crud_event.get_by_participant(db, participant_id=participant_id)
             
             if all_history_events:
                 # 如果有历史事件，说明不是新用户
-                print(f"INFO: Found {len(all_history_events)} historical events for {participant_id}. Not a new user.")
+                logger.info(f"Found {len(all_history_events)} historical events for {participant_id}. Not a new user.")
                 temp_profile = StudentProfile(participant_id, is_new_user=False)
                 self._state_cache[participant_id] = temp_profile
             else:
                 # 如果没有历史事件，说明是新用户
-                print(f"INFO: No history found for {participant_id}. This is a new user.")
+                logger.info(f"No history found for {participant_id}. This is a new user.")
                 temp_profile = StudentProfile(participant_id, is_new_user=True)
                 self._state_cache[participant_id] = temp_profile
             
@@ -187,10 +273,11 @@ class UserStateService:
             events_after_snapshot = all_history_events or []
             
         if not events_after_snapshot:
-            print(f"INFO: No events to replay for {participant_id}.")
+            logger.info(f"No events to replay for {participant_id}.")
             return  # 没有事件需要回放
         
         # 4. 回放事件
+        from .behavior_interpreter_service import behavior_interpreter_service
         for event in events_after_snapshot:
             # 将数据库模型转换为Pydantic模型
             # 如果event已经是BehaviorEvent实例或具有正确属性的mock对象，则直接使用
@@ -198,15 +285,31 @@ class UserStateService:
                 event_schema = event
             else:
                 try:
-                    event_schema = BehaviorEvent.model_validate(event)
+                    # 如果event是EventLog对象（来自数据库），需要手动构造字典
+                    if hasattr(event, '__dict__'):
+                        # 从EventLog对象创建字典
+                        event_dict = {
+                            'participant_id': event.participant_id,
+                            'event_type': event.event_type,
+                            'event_data': event.event_data,
+                            'timestamp': event.timestamp
+                        }
+                        event_schema = BehaviorEvent.model_validate(event_dict)
+                    else:
+                        event_schema = BehaviorEvent.model_validate(event)
                 except Exception:
                     # 如果验证失败（例如在测试中使用mock对象），则跳过该事件
-                    print(f"WARNING: Failed to validate event {event}. Skipping.")
+                    logger.warning(f"Failed to validate event {event}. Skipping.")
                     continue
             # 调用解释器，但在回放模式下
-            self.interpreter.interpret_event(event_schema, is_replay=True)
+            behavior_interpreter_service.interpret_event(
+                event_schema, 
+                user_state_service=self, 
+                db_session=db, 
+                is_replay=True
+            )
         
-        print(f"INFO: Recovery complete for {participant_id}.")
+        logger.info(f"Recovery complete for {participant_id}.")
 
     def _maybe_create_snapshot(self, participant_id: str, db: Session, background_tasks=None):
         """根据策略判断是否需要创建快照"""
@@ -230,19 +333,28 @@ class UserStateService:
             event_count_since_snapshot = crud_event.get_count_by_participant(db, participant_id=participant_id)
             
         # 检查是否满足快照创建条件
-        time_since_last_snapshot = datetime.now(UTC) - (latest_snapshot.timestamp if latest_snapshot else datetime.min)
+        # 确保时间戳有时区信息
+        if latest_snapshot:
+            snapshot_timestamp = latest_snapshot.timestamp
+            # 如果时间戳是naive的，将其转换为UTC时区
+            if snapshot_timestamp.tzinfo is None:
+                snapshot_timestamp = snapshot_timestamp.replace(tzinfo=timezone.utc)
+        else:
+            snapshot_timestamp = datetime.min.replace(tzinfo=timezone.utc)
+        
+        time_since_last_snapshot = datetime.now(UTC) - snapshot_timestamp
         
         if (event_count_since_snapshot >= self.SNAPSHOT_EVENT_INTERVAL or 
             time_since_last_snapshot >= self.SNAPSHOT_TIME_INTERVAL):
             
-            print(f"INFO: Creating snapshot for {participant_id}...")
+            logger.info(f"Creating snapshot for {participant_id}...")
             
             # 创建快照事件
-            from ..schemas.behavior import EventType
+            from ..schemas.behavior import EventType, StateSnapshotData
             snapshot_event = BehaviorEvent(
                 participant_id=participant_id,
                 event_type=EventType.STATE_SNAPSHOT,
-                event_data=profile.to_dict(),
+                event_data=StateSnapshotData(profile_data=profile.to_dict()),
                 timestamp=datetime.now(UTC)
             )
             
@@ -254,11 +366,11 @@ class UserStateService:
                 else:
                     # 兼容其他后台任务机制
                     background_tasks.add_task(crud_event.create_from_behavior, db, snapshot_event)
-                print(f"INFO: Snapshot scheduled for async save: {participant_id}")
+                logger.info(f"Snapshot scheduled for async save: {participant_id}")
             else:
                 # 同步保存（备用方案）
                 crud_event.create_from_behavior(db, obj_in=snapshot_event)
-                print(f"INFO: Snapshot created for {participant_id}")
+                logger.info(f"Snapshot created for {participant_id}")
             
             # 清理旧快照
             self._cleanup_old_snapshots(participant_id, db)
@@ -272,9 +384,9 @@ class UserStateService:
             snapshots_to_delete = snapshots[:-keep_latest]
             
             for snapshot in snapshots_to_delete:
-                crud_event.remove(db, id=snapshot.id)
+                crud_event.remove(db, obj_id=snapshot.id)
             
-            print(f"INFO: Cleaned up {len(snapshots_to_delete)} old snapshots for {participant_id}.")
+            logger.info(f"Cleaned up {len(snapshots_to_delete)} old snapshots for {participant_id}.")
 
     def update_bkt_on_submission(self, participant_id: str, topic_id: str, is_correct: bool) -> float:
         """
@@ -298,7 +410,7 @@ class UserStateService:
         # 更新BKT模型
         mastery_prob = profile.bkt_model[topic_id].update(is_correct)
         
-        print(f"INFO: Updated BKT model for participant {participant_id}, topic {topic_id}. "
+        logger.info(f"Updated BKT model for participant {participant_id}, topic {topic_id}. "
               f"Correct: {is_correct}, New mastery probability: {mastery_prob:.3f}")
         
         return mastery_prob

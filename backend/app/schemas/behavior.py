@@ -1,10 +1,5 @@
-<<<<<<< HEAD
-from pydantic import BaseModel
-from typing import Dict, Any,Literal, Optional
-=======
 from pydantic import BaseModel, Field
-from typing import Dict, Optional, Union, Literal
->>>>>>> upstream/main
+from typing import Dict, Any,Literal, Optional, Union, Literal
 from datetime import datetime
 from enum import Enum
 
@@ -44,7 +39,7 @@ class AiHelpRequestData(BaseModel):
     message: str = Field(..., min_length=1, description="用户向AI提问的消息内容")
 
 
-class TestSubmissionData(BaseModel):
+class SubmissionData(BaseModel):
     """测试提交数据
     
     Attributes:
@@ -84,13 +79,23 @@ class PageFocusChangeData(BaseModel):
     status: Literal["focus", "blur"] = Field(..., description="焦点状态")
 
 
+class StateSnapshotData(BaseModel):
+    """状态快照数据
+    
+    Attributes:
+        profile_data: 用户档案数据
+    """
+    profile_data: Dict[str, Any] = Field(..., description="用户档案数据")
+
+
 EventDataType = Union[
     CodeEditData,
     AiHelpRequestData,
-    TestSubmissionData,
+    SubmissionData,
     DomElementSelectData,
     UserIdleData,
-    PageFocusChangeData
+    PageFocusChangeData,
+    StateSnapshotData
 ]
 
 
@@ -106,27 +111,15 @@ class BehaviorEvent(BaseModel):
         event_data: 事件数据，根据事件类型有不同的结构
         timestamp: 事件发生的时间戳，可选字段，默认为当前时间
     """
-<<<<<<< HEAD
+
     # 与 TDD-II-07 对齐的事件类型枚举（若将来扩展只需在此添加）TODO：ceq可能添加热力图事件（heatmap_snapshot）
-    EventType = Literal[
-    "code_edit",
-    "ai_help_request",
-    "test_submission",
-    "dom_element_select",
-    "user_idle",
-    "page_focus_change"
-]
-    # TODO: cxz 需要根据TDD-II-07中的事件类型定义，补充字段说明和验证规则
-    participant_id: str
-    event_type: str
-    event_data: Dict[str, Any]
-    timestamp: Optional[datetime] = None
-=======
+    # 使用已定义的 EventType 枚举类
+
     participant_id: str = Field(..., description="参与者ID，用于标识特定用户")
     event_type: EventType = Field(..., description="事件类型")
     event_data: EventDataType = Field(..., description="事件数据，根据事件类型有不同的结构")
     timestamp: Optional[datetime] = Field(None, description="事件发生的时间戳，可选字段，默认为当前时间")
->>>>>>> upstream/main
+
     
     class Config:
         orm_mode = True
