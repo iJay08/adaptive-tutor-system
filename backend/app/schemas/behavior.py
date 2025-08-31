@@ -19,8 +19,10 @@ class EventType(str, Enum):
     KNOWLEDGE_LEVEL_ACCESS = "knowledge_level_access"
     STATE_SNAPSHOT = "state_snapshot"
     PAGE_CLICK="page_click"
-    CODING_PROBLEM = "coding_problem"          # 新增
-    SIGNIFICANT_EDIT = "significant_edit"      # 新增
+    LARGE_ADDITION = "large_addition"
+    CODING_SESSION_SUMMARY = "coding_session_summary"
+    IDLE_HINT_DISPLAYED = "idle_hint_displayed"
+    PAGE_FOCUS_CHANGE = "page_focus_change"
     PROBLEM_HINT_DISPLAYED = "problem_hint_displayed"
     SIGNIFICANT_EDITS_BATCH = "significant_edits_batch"
     IDLE_HINT_DISPLAYED = "idle_hint_displayed"
