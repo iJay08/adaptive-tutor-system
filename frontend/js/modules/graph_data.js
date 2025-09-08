@@ -338,11 +338,20 @@ export class GraphState {
       console.error('读取已完成章节时出错:', error);
     }
 
-    // 然后检查原有的逻辑
+    // 检查章节下的所有知识点是否都已完成（包括章节测试）
     const ks = this.collectKnowledgeDescendantsForDep(chapterId);
     if (ks.length === 0) return false;
-    const allLearned = ks.every(id => this.learnedNodes.includes(id));
-    return allLearned && this.chaptersPassed.has(chapterId);
+
+    // 获取章节号，用于检查章节测试
+    const chapterNum = parseInt(chapterId.replace('chapter', ''));
+    const chapterTestId = `${chapterNum}_end`;
+
+    // 检查所有知识点（包括章节测试）是否都已完成
+    const allKnowledgeCompleted = ks.every(id => this.learnedNodes.includes(id));
+    const chapterTestCompleted = this.learnedNodes.includes(chapterTestId);
+
+    // 如果所有知识点都完成，且章节测试也完成，则认为章节已完成
+    return allKnowledgeCompleted && chapterTestCompleted;
   }
 
   // 收集依赖知识点
